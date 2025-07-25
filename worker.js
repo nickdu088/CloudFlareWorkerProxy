@@ -7,11 +7,59 @@ const HTML_FORM = `
 <html>
 <head>
   <title>Online Proxy</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: sans-serif; margin: 2em; }
-    input[type="text"] { width: 400px; padding: 0.5em; }
-    input[type="submit"] { padding: 0.5em 1em; }
-    #url-display { margin-top: 1em; color: #333; }
+    body {
+      font-family: sans-serif;
+      margin: 2em;
+      max-width: 600px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      padding: 0.75em;
+      margin-bottom: 1em;
+      box-sizing: border-box;
+      font-size: 1em;
+    }
+
+    input[type="submit"] {
+      padding: 0.75em 1.5em;
+      font-size: 1em;
+      cursor: pointer;
+    }
+
+    #url-display {
+      margin-top: 1em;
+      color: #333;
+    }
+
+    #loading {
+      display: none;
+      margin-top: 1em;
+      font-style: italic;
+      color: #888;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      body {
+        background-color: #121212;
+        color: #f0f0f0;
+      }
+
+      input[type="text"],
+      input[type="submit"] {
+        background-color: #1e1e1e;
+        color: #fff;
+        border: 1px solid #444;
+      }
+
+      #loading {
+        color: #ccc;
+      }
+    }
   </style>
 </head>
 <body>
@@ -21,10 +69,22 @@ const HTML_FORM = `
     <input type="submit" value="Go" />
   </form>
   <div id="url-display"></div>
+  <div id="loading">Loading...</div>
+
   <script>
-    document.getElementById('proxy-form').addEventListener('submit', function(e) {
-      const input = document.getElementById('url-input');
-      document.getElementById('url-display').textContent = 'Requested URL: ' + input.value;
+    const form = document.getElementById('proxy-form');
+    const input = document.getElementById('url-input');
+    const display = document.getElementById('url-display');
+    const loading = document.getElementById('loading');
+
+    form.addEventListener('submit', function(e) {
+      display.textContent = 'Requested URL: ' + input.value;
+      loading.style.display = 'block';
+    });
+
+    // Hide loading after navigation completes (optional fallback)
+    window.addEventListener('pageshow', () => {
+      loading.style.display = 'none';
     });
   </script>
 </body>
