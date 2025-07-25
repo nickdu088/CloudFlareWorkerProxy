@@ -85,10 +85,29 @@ async function handleRequest(request) {
     const contentType = response.headers.get('content-type') || '';
     const headers = sanitizeHeaders(response.headers);
 
+    // Handle redirect manually
+    if (response.status >= 300 && response.status < 400 && response.headers.has('location')) {
+      const location = response.headers.get('location');
+      let resolvedLocation;
+      try {
+        resolvedLocation = new URL(location, targetUrl).href;
+      } catch (e) {
+        return new Response('Invalid redirect location', { status: 502 });
+      }
+
+      const proxiedLocation = `/?url=${encodeURIComponent(resolvedLocation)}`;
+      return new Response(null, {
+        status: response.status,
+        headers: {
+          ...Object.fromEntries(headers),
+          location: proxiedLocation
+        }
+      });
+    }
+
     if (contentType.includes('text/html')) {
       let html = await response.text();
 
-      // --- Rewriting using regex (for href/src/etc) ---
       html = html.replace(
         /\b(href|src|action|formaction)=["']([^"']+)["']/gi,
         (match, attr, link) => {
@@ -102,7 +121,6 @@ async function handleRequest(request) {
         }
       );
 
-      // --- JavaScript rewrites (basic) ---
       html = html.replace(
         /\b(location\.href\s*=\s*|window\.open\s*\(|fetch\s*\(|XMLHttpRequest\.open\s*\(\s*['"](?:GET|POST|PUT|DELETE|OPTIONS|HEAD)['"]\s*,\s*)["']([^"']+)["']/gi,
         (match, prefix, link) => {
