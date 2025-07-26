@@ -2,6 +2,25 @@ addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request));
 });
 
+// === Authentication Config ===
+const AUTH_USERNAME = 'admin';
+const AUTH_PASSWORD = 'admin';
+
+// === Basic Auth Check ===
+function isAuthenticated(request) {
+  const auth = request.headers.get('authorization');
+  if (!auth || !auth.startsWith('Basic ')) return false;
+
+  try {
+    const encoded = auth.split(' ')[1];
+    const decoded = atob(encoded);
+    const [user, pass] = decoded.split(':');
+    return user === AUTH_USERNAME && pass === AUTH_PASSWORD;
+  } catch {
+    return false;
+  }
+}
+
 const HTML_FORM = `
 <!DOCTYPE html>
 <html>
@@ -104,9 +123,9 @@ function isValidUrl(url) {
 }
 
 /**
- * Sanitize headers, keep set-cookie but rewrite domains.
+ * Sanitize headers, exclude certain headers and exclude Set-Cookie (handled separately)
  */
-function sanitizeHeaders(headers, proxyHost) {
+function sanitizeHeaders(headers) {
   const newHeaders = new Headers();
   for (const [key, value] of headers.entries()) {
     const keyLower = key.toLowerCase();
@@ -117,9 +136,8 @@ function sanitizeHeaders(headers, proxyHost) {
     ) {
       continue;
     }
-    // We handle set-cookie separately
     if (keyLower === 'set-cookie') {
-      continue;
+      continue; // skip set-cookie, handle separately
     }
     newHeaders.append(key, value);
   }
@@ -127,15 +145,14 @@ function sanitizeHeaders(headers, proxyHost) {
 }
 
 /**
- * Rewrite Set-Cookie headers domains to proxy domain
+ * Rewrite Set-Cookie header domains to proxy domain (by removing Domain attribute)
  */
-function rewriteSetCookieHeaders(setCookieHeaders, proxyHost) {
-  return setCookieHeaders.map(cookieStr => {
-    // Remove Domain attribute so cookie defaults to proxy domain
-    return cookieStr
-      .replace(/domain=[^;]+;/i, '') // Remove Domain attribute if present
-      .replace(/;\s*$/, ''); // Clean trailing ;
-  });
+function rewriteSetCookieHeaders(setCookieHeaders) {
+  return setCookieHeaders.map(cookieStr =>
+    cookieStr
+      .replace(/domain=[^;]+;/i, '') // remove Domain attribute
+      .replace(/;\s*$/, '') // remove trailing semicolon if any
+  );
 }
 
 /**
@@ -183,7 +200,9 @@ function rewriteHtmlUrls(html, baseUrl) {
       )
         return match;
       try {
-        const resolved = new URL(link, baseUrl).href;
+        // Handle protocol-relative URLs starting with //
+        const urlStr = link.startsWith('//') ? baseUrl.protocol + link : link;
+        const resolved = new URL(urlStr, baseUrl).href;
         return `${attr}="/?url=${encodeURIComponent(resolved)}"`;
       } catch {
         return match;
@@ -202,7 +221,9 @@ function rewriteHtmlUrls(html, baseUrl) {
       )
         return match;
       try {
-        const resolved = new URL(link, baseUrl).href;
+        // Handle protocol-relative URLs starting with //
+        const urlStr = link.startsWith('//') ? baseUrl.protocol + link : link;
+        const resolved = new URL(urlStr, baseUrl).href;
         return `${prefix}"${'/?url=' + encodeURIComponent(resolved)}"`;
       } catch {
         return match;
@@ -248,10 +269,21 @@ function injectUI(html) {
 }
 
 async function handleRequest(request) {
+  // Enforce Basic Auth
+  if (!isAuthenticated(request)) {
+    return new Response('Unauthorized', {
+      status: 401,
+      headers: {
+        'WWW-Authenticate': 'Basic realm="Proxy Login"',
+        'Content-Type': 'text/plain'
+      }
+    });
+  }
+
   const url = new URL(request.url);
   let target = url.searchParams.get('url');
 
-  // Add https:// if no protocol specified
+  // Auto-add https:// if missing protocol
   if (target && !/^https?:\/\//i.test(target)) {
     target = 'https://' + target;
   }
@@ -287,101 +319,76 @@ async function handleRequest(request) {
 
     const response = await fetch(proxyRequest);
 
-    // Handle redirect responses
+    // Handle redirects manually
     if (
       response.status >= 300 &&
       response.status < 400 &&
       response.headers.has('location')
     ) {
       const location = response.headers.get('location');
-      let resolvedLocation;
+      let redirectUrl = location;
       try {
-        resolvedLocation = new URL(location, targetUrl).href;
-      } catch {
-        return new Response('Invalid redirect location', { status: 502 });
-      }
-      const proxiedLocation = `/?url=${encodeURIComponent(resolvedLocation)}`;
+        // Convert relative redirect to absolute
+        redirectUrl = new URL(location, target).href;
+      } catch {}
 
-      // Rewrite Set-Cookie headers
-      const setCookieRaw = [];
-      if (typeof response.headers.raw === 'function') {
-        const rawHeaders = response.headers.raw();
-        if (rawHeaders['set-cookie']) {
-          setCookieRaw.push(...rawHeaders['set-cookie']);
-        }
-      }
-      const newHeaders = sanitizeHeaders(response.headers, proxyHost);
-      rewriteSetCookieHeaders(setCookieRaw, proxyHost).forEach(cookie => {
-        newHeaders.append('set-cookie', cookie);
-      });
-
+      // Rewrite redirect to proxy URL
+      const proxyRedirectUrl = '/?url=' + encodeURIComponent(redirectUrl);
       return new Response(null, {
         status: response.status,
         headers: {
-          ...Object.fromEntries(newHeaders),
-          location: proxiedLocation,
+          location: proxyRedirectUrl,
         },
       });
     }
 
     const contentType = response.headers.get('content-type') || '';
 
-    // Rewrite Set-Cookie headers for normal responses
-    const rawSetCookie = [];
-    if (typeof response.headers.raw === 'function') {
-      const rawHeaders = response.headers.raw();
-      if (rawHeaders['set-cookie']) {
-        rawSetCookie.push(...rawHeaders['set-cookie']);
+    // Handle Set-Cookie headers: collect all
+    const setCookieHeaders = [];
+    for (const [key, value] of response.headers.entries()) {
+      if (key.toLowerCase() === 'set-cookie') {
+        setCookieHeaders.push(value);
       }
     }
-    const newHeaders = sanitizeHeaders(response.headers, proxyHost);
-    rewriteSetCookieHeaders(rawSetCookie, proxyHost).forEach(cookie => {
+
+    // Sanitize headers (drop CSP, Clear-Site-Data, Set-Cookie)
+    const newHeaders = sanitizeHeaders(response.headers);
+
+    // Rewrite Set-Cookie headers (remove Domain attribute so cookies work on proxy domain)
+    rewriteSetCookieHeaders(setCookieHeaders).forEach(cookie => {
       newHeaders.append('set-cookie', cookie);
     });
 
-    // HTML response - rewrite URLs & inject UI + base tag
+    // Rewrite Content Security Policy to allow inline script and styles? We just remove it for now
+
+    // Handle rewriting of HTML and CSS
     if (contentType.includes('text/html')) {
-      let html = await response.text();
-
-      html = rewriteHtmlUrls(html, targetUrl);
-      html = injectUI(html);
-
-      if (html.includes('<head>')) {
-        html = html.replace(
-          /<head>/i,
-          `<head><base href="${targetUrl.origin}${targetUrl.pathname}">`
-        );
-      }
-
-      return new Response(html, {
+      const originalText = await response.text();
+      let rewritten = rewriteHtmlUrls(originalText, targetUrl);
+      rewritten = injectUI(rewritten);
+      return new Response(rewritten, {
         status: response.status,
-        statusText: response.statusText,
+        headers: newHeaders,
+      });
+    } else if (contentType.includes('text/css')) {
+      const cssText = await response.text();
+      const rewrittenCss = rewriteCssUrls(cssText, targetUrl);
+      return new Response(rewrittenCss, {
+        status: response.status,
+        headers: newHeaders,
+      });
+    } else {
+      // For all other types, just forward response as-is
+      return new Response(response.body, {
+        status: response.status,
         headers: newHeaders,
       });
     }
-
-    // CSS response - rewrite url(...) inside CSS
-    if (
-      contentType.includes('text/css') ||
-      contentType.includes('application/css')
-    ) {
-      let cssText = await response.text();
-      cssText = rewriteCssUrls(cssText, targetUrl);
-
-      return new Response(cssText, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: newHeaders,
-      });
-    }
-
-    // Other content types - just proxy as is
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: newHeaders,
+  } catch (e) {
+    return new Response('Error fetching URL: ' + e.message, {
+      status: 500,
+      headers: { 'content-type': 'text/plain' },
     });
-  } catch (err) {
-    return new Response('Error fetching target: ' + err.toString(), { status: 502 });
   }
 }
